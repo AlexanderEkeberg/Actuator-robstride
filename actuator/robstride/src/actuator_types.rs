@@ -102,6 +102,7 @@ pub enum ActuatorType {
     RobStride02 = 2,
     RobStride03 = 3,
     RobStride04 = 4,
+    RobStride06 = 6,
 }
 
 #[derive(Debug, Clone, PartialEq)]

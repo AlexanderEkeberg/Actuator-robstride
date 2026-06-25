@@ -65,6 +65,7 @@ setup(
             target="actuator.bindings",
             path="actuator/bindings/Cargo.toml",
             binding=Binding.PyO3,
+            features=["extension-module"],
         ),
     ],
     setup_requires=["setuptools-rust"],

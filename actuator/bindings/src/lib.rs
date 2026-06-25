@@ -116,6 +116,23 @@ struct RobstrideActuatorState {
     temperature: Option<f64>,
 }
 
+fn command_values_rad_native(cmd: &RobstrideActuatorCommand) -> (f32, f32, f32) {
+    (
+        cmd.position.map(|p| p as f32).unwrap_or(0.0),
+        cmd.velocity.map(|v| v as f32).unwrap_or(0.0),
+        cmd.torque.map(|t| t as f32).unwrap_or(0.0),
+    )
+}
+
+fn feedback_values_rad_native(feedback: &robstride::FeedbackFrame) -> (f64, f64, f64, f64) {
+    (
+        feedback.angle as f64,
+        feedback.velocity as f64,
+        feedback.torque as f64,
+        feedback.temperature as f64,
+    )
+}
+
 #[gen_stub_pyclass]
 #[pyclass]
 #[derive(Clone)]
@@ -239,8 +256,8 @@ impl RobstrideActuator {
     ) -> PyResult<Self> {
         let actuators_config: Vec<(u8, ActuatorConfiguration)> = py_actuators_config
             .into_iter()
-            .map(|(id, config)| (id, config.into()))
-            .collect();
+            .map(|(id, config)| Ok((id, config.try_into()?)))
+            .collect::<PyResult<_>>()?;
 
         let rt = Runtime::new().map_err(|e| ErrReportWrapper(e.into()))?;
 
@@ -293,13 +310,9 @@ impl RobstrideActuator {
             let mut supervisor = self.supervisor.lock().await;
 
             for cmd in commands {
+                let (position, velocity, torque) = command_values_rad_native(&cmd);
                 match supervisor
-                    .command(
-                        cmd.actuator_id as u8,
-                        cmd.position.map(|p| p.to_radians() as f32).unwrap_or(0.0),
-                        cmd.velocity.map(|v| v.to_radians() as f32).unwrap_or(0.0),
-                        cmd.torque.map(|t| t as f32).unwrap_or(0.0),
-                    )
+                    .command(cmd.actuator_id as u8, position, velocity, torque)
                     .await
                 {
                     Ok(_) => results.push(true),
@@ -366,14 +379,16 @@ impl RobstrideActuator {
 
             for id in actuator_ids {
                 if let Ok(Some((feedback, ts))) = supervisor.get_feedback(id as u8).await {
+                    let (position, velocity, torque, temperature) =
+                        feedback_values_rad_native(&feedback);
                     responses.push(RobstrideActuatorState {
                         actuator_id: id,
                         online: ts.elapsed().unwrap_or(Duration::from_secs(1))
                             < Duration::from_secs(1),
-                        position: Some(feedback.angle.to_degrees() as f64),
-                        velocity: Some(feedback.velocity.to_degrees() as f64),
-                        torque: Some(feedback.torque as f64),
-                        temperature: Some(feedback.temperature as f64),
+                        position: Some(position),
+                        velocity: Some(velocity),
+                        torque: Some(torque),
+                        temperature: Some(temperature),
                     });
                 }
             }
@@ -410,21 +425,101 @@ impl RobstrideActuator {
     }
 }
 
-impl From<RobstrideActuatorConfig> for robstride::ActuatorConfiguration {
-    fn from(config: RobstrideActuatorConfig) -> Self {
-        Self {
-            actuator_type: match config.actuator_type {
-                0 => ActuatorType::RobStride00,
-                1 => ActuatorType::RobStride01,
-                2 => ActuatorType::RobStride02,
-                3 => ActuatorType::RobStride03,
-                4 => ActuatorType::RobStride04,
-                _ => ActuatorType::RobStride00,
-            },
+fn actuator_type_from_u8(actuator_type: u8) -> Result<ActuatorType, String> {
+    match actuator_type {
+        0 => Ok(ActuatorType::RobStride00),
+        1 => Ok(ActuatorType::RobStride01),
+        2 => Ok(ActuatorType::RobStride02),
+        3 => Ok(ActuatorType::RobStride03),
+        4 => Ok(ActuatorType::RobStride04),
+        6 => Ok(ActuatorType::RobStride06),
+        other => Err(format!(
+            "Unknown actuator type: {other}. Supported: 0,1,2,3,4,6"
+        )),
+    }
+}
+
+impl TryFrom<RobstrideActuatorConfig> for robstride::ActuatorConfiguration {
+    type Error = PyErr;
+
+    fn try_from(config: RobstrideActuatorConfig) -> Result<Self, Self::Error> {
+        // Unknown actuator types must be a hard error. Wrong scaling on a
+        // powered motor is unsafe.
+        let actuator_type = actuator_type_from_u8(config.actuator_type)
+            .map_err(|message| PyErr::new::<pyo3::exceptions::PyValueError, _>(message))?;
+        Ok(Self {
+            actuator_type,
             max_angle_change: config.max_angle_change.map(|v| v as f32),
             max_velocity: config.max_velocity.map(|v| v as f32),
             command_rate_hz: Some(100.0f32),
-        }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn actuator_config_accepts_robstride06() {
+        let config = robstride::ActuatorConfiguration::try_from(RobstrideActuatorConfig {
+            actuator_type: 6,
+            max_angle_change: Some(1.25),
+            max_velocity: Some(2.5),
+        })
+        .expect("RobStride06 should be accepted");
+
+        assert_eq!(config.actuator_type, ActuatorType::RobStride06);
+        assert_eq!(config.max_angle_change, Some(1.25));
+        assert_eq!(config.max_velocity, Some(2.5));
+    }
+
+    #[test]
+    fn unknown_actuator_type_returns_clear_error() {
+        let err = actuator_type_from_u8(5).expect_err("unknown actuator types must be rejected");
+
+        assert_eq!(err, "Unknown actuator type: 5. Supported: 0,1,2,3,4,6");
+    }
+
+    #[test]
+    fn python_command_values_are_radian_native() {
+        let cmd = RobstrideActuatorCommand {
+            actuator_id: 1,
+            position: Some(std::f64::consts::FRAC_PI_2),
+            velocity: Some(2.25),
+            torque: Some(3.5),
+        };
+
+        let (position, velocity, torque) = command_values_rad_native(&cmd);
+
+        assert_eq!(position, std::f32::consts::FRAC_PI_2);
+        assert_eq!(velocity, 2.25);
+        assert_eq!(torque, 3.5);
+    }
+
+    #[test]
+    fn python_feedback_values_are_radian_native() {
+        let feedback = robstride::FeedbackFrame {
+            angle: std::f32::consts::FRAC_PI_2,
+            velocity: 1.75,
+            torque: 2.5,
+            temperature: 32.0,
+            fault_uncalibrated: false,
+            fault_hall_encoding: false,
+            fault_magnetic_encoding: false,
+            fault_over_temperature: false,
+            fault_overcurrent: false,
+            fault_undervoltage: false,
+            mode: robstride::MotorMode::Run,
+            motor_id: 1,
+        };
+
+        let (position, velocity, torque, temperature) = feedback_values_rad_native(&feedback);
+
+        assert_eq!(position, std::f32::consts::FRAC_PI_2 as f64);
+        assert_eq!(velocity, 1.75);
+        assert_eq!(torque, 2.5);
+        assert_eq!(temperature, 32.0);
     }
 }
 

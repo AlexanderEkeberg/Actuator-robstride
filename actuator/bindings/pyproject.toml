@@ -5,3 +5,6 @@ build-backend = "maturin"
 [project]
 name = "bindings"
 requires-python = ">=3.9"
+
+[tool.maturin]
+features = ["extension-module"]
