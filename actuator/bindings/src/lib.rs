@@ -161,12 +161,12 @@ impl RobstrideActuatorConfig {
 #[gen_stub_pyclass]
 #[pyclass]
 pub struct CH341TransportWrapper {
-    transport: CH341Transport,
+    port_name: String,
 }
 
 impl CH341TransportWrapper {
-    fn get_transport(&self) -> CH341Transport {
-        self.transport.clone()
+    fn port_name(&self) -> String {
+        self.port_name.clone()
     }
 }
 
@@ -175,13 +175,7 @@ impl CH341TransportWrapper {
 impl CH341TransportWrapper {
     #[new]
     fn new(port_name: String) -> PyResult<Self> {
-        let rt = Runtime::new().map_err(|e| ErrReportWrapper(e.into()))?;
-        let transport = rt.block_on(async {
-            CH341Transport::new(port_name)
-                .await
-                .map_err(ErrReportWrapper)
-        })?;
-        Ok(Self { transport })
+        Ok(Self { port_name })
     }
 }
 
@@ -262,32 +256,56 @@ impl RobstrideActuator {
 
         let rt = Runtime::new().map_err(|e| ErrReportWrapper(e.into()))?;
 
+        enum TransportSpec {
+            CH341(String),
+            Ready(TransportType),
+        }
+
+        let transport_specs: Vec<TransportSpec> = transports
+            .iter()
+            .map(|transport_obj| {
+                if let Ok(ch341_wrapper) = transport_obj.extract::<PyRef<CH341TransportWrapper>>(py)
+                {
+                    Ok(TransportSpec::CH341(ch341_wrapper.port_name()))
+                } else {
+                    Self::extract_transport_type(transport_obj, py)
+                        .map(TransportSpec::Ready)
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                                "Transport extraction failed: {e}"
+                            ))
+                        })
+                }
+            })
+            .collect::<PyResult<_>>()?;
+
         let (supervisor, discovered_ids) = rt.block_on(async {
             let mut supervisor =
                 Supervisor::new(Duration::from_secs(1)).map_err(ErrReportWrapper)?;
             let mut all_discovered_ids = Vec::new();
+            let mut port_names = Vec::new();
 
-            for transport_obj in &transports {
-                let transport_type =
-                    Self::extract_transport_type(transport_obj, py).map_err(|e| {
-                        ErrReportWrapper(eyre::eyre!("Transport extraction failed: {}", e))
-                    })?;
+            for transport_spec in transport_specs {
+                let transport_type = match transport_spec {
+                    TransportSpec::CH341(port_name) => TransportType::CH341(
+                        CH341Transport::new(port_name)
+                            .await
+                            .map_err(ErrReportWrapper)?,
+                    ),
+                    TransportSpec::Ready(transport_type) => transport_type,
+                };
                 let port_name = transport_type.port();
                 supervisor
-                    .add_transport(port_name, transport_type)
+                    .add_transport(port_name.clone(), transport_type)
                     .await
                     .map_err(ErrReportWrapper)?;
+                port_names.push(port_name);
             }
 
             // Scan for motors
-            for transport_obj in &transports {
-                let transport_type =
-                    Self::extract_transport_type(transport_obj, py).map_err(|e| {
-                        ErrReportWrapper(eyre::eyre!("Transport extraction failed: {}", e))
-                    })?;
-                let port_name = transport_type.port();
+            for port_name in &port_names {
                 let discovered_ids = supervisor
-                    .scan_bus(0xFD, &port_name, &actuators_config)
+                    .scan_bus(0xFD, port_name, &actuators_config)
                     .await
                     .map_err(ErrReportWrapper)?;
                 for (motor_id, _) in &actuators_config {
@@ -433,11 +451,6 @@ impl RobstrideActuator {
         transport_obj: &Py<PyAny>,
         py: Python,
     ) -> Result<TransportType, PyErr> {
-        // Try to extract CH341Transport
-        if let Ok(ch341_wrapper) = transport_obj.extract::<PyRef<CH341TransportWrapper>>(py) {
-            return Ok(TransportType::CH341(ch341_wrapper.get_transport()));
-        }
-
         // Try to extract SocketCanTransport (Linux only)
         #[cfg(target_os = "linux")]
         if let Ok(socketcan_wrapper) = transport_obj.extract::<PyRef<SocketCanTransportWrapper>>(py)
