@@ -135,29 +135,17 @@ def main() -> None:
     parser.add_argument("--max-temperature", type=float, default=60.0)
     parser.add_argument("--dangerous-enable", action="store_true")
     parser.add_argument("--dangerous-motion", action="store_true")
-    parser.add_argument("--allow-larger-step", action="store_true")
     parser.add_argument("--confirm", default="")
     args = parser.parse_args()
 
-    larger_step = abs(args.step_rad) > 0.10
-    required_confirm = "MOVE_LARGER" if larger_step else "MOVE"
-
-    if (
-        not args.dangerous_enable
-        or not args.dangerous_motion
-        or args.confirm != required_confirm
-    ):
+    if not args.dangerous_enable or not args.dangerous_motion or args.confirm != "MOVE":
         raise SystemExit(
             "Refusing motion. Re-run with: "
-            f"--dangerous-enable --dangerous-motion --confirm {required_confirm}"
+            "--dangerous-enable --dangerous-motion --confirm MOVE"
         )
 
     if not math.isfinite(args.step_rad) or abs(args.step_rad) <= 0.0:
         raise SystemExit("--step-rad must be finite and nonzero")
-    if larger_step and not args.allow_larger_step:
-        raise SystemExit(
-            "--step-rad > 0.10 requires --allow-larger-step --confirm MOVE_LARGER"
-        )
     if abs(args.step_rad) > 0.50:
         raise SystemExit("--step-rad must be <= 0.50 rad for this bench test")
     if args.kp < 0.0 or args.kp > 50.0:
