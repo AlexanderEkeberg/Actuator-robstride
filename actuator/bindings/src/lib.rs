@@ -431,6 +431,49 @@ impl RobstrideActuator {
         })
     }
 
+    fn command_actuator_now(
+        &self,
+        cmd: RobstrideActuatorCommand,
+        kp: f64,
+        kd: f64,
+        dangerous_motion: bool,
+    ) -> PyResult<bool> {
+        if !dangerous_motion {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "command_actuator_now requires dangerous_motion=True",
+            ));
+        }
+
+        if cmd.position.is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "command_actuator_now requires cmd.position",
+            ));
+        }
+
+        if !self.discovered_ids.contains(&cmd.actuator_id) {
+            return Ok(false);
+        }
+
+        let actuator_id = cmd.actuator_id;
+        let (position, velocity, torque) = command_values_rad_native(&cmd);
+
+        self.rt.block_on(async {
+            let mut supervisor = self.supervisor.lock().await;
+            supervisor
+                .command_now(
+                    actuator_id as u8,
+                    position,
+                    velocity,
+                    torque,
+                    kp as f32,
+                    kd as f32,
+                )
+                .await
+                .map_err(ErrReportWrapper)?;
+            Ok(true)
+        })
+    }
+
     fn configure_actuator(&self, config: RobstrideConfigureRequest) -> PyResult<bool> {
         self.rt.block_on(async {
             let mut supervisor = self.supervisor.lock().await;

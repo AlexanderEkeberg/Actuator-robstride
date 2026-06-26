@@ -781,6 +781,82 @@ impl Supervisor {
         Ok(())
     }
 
+    pub async fn command_now(
+        &mut self,
+        id: u8,
+        position: f32,
+        velocity: f32,
+        torque: f32,
+        kp: f32,
+        kd: f32,
+    ) -> Result<()> {
+        let mut actuators = self.actuators.write().await;
+        let record = actuators
+            .get_mut(&id)
+            .ok_or_else(|| eyre::eyre!("Actuator not found"))?;
+
+        let position = denormalize_radians(position, record.state.half_revolutions);
+
+        let cmd = match record.state.actuator_type {
+            ActuatorType::RobStride00 => RobStride00Command {
+                target_angle_rad: position,
+                target_velocity_rads: velocity,
+                torque_nm: torque,
+                kp,
+                kd,
+            }
+            .to_control_command(),
+            ActuatorType::RobStride01 => RobStride01Command {
+                target_angle_rad: position,
+                target_velocity_rads: velocity,
+                torque_nm: torque,
+                kp,
+                kd,
+            }
+            .to_control_command(),
+            ActuatorType::RobStride02 => RobStride02Command {
+                target_angle_rad: position,
+                target_velocity_rads: velocity,
+                torque_nm: torque,
+                kp,
+                kd,
+            }
+            .to_control_command(),
+            ActuatorType::RobStride03 => RobStride03Command {
+                target_angle_rad: position,
+                target_velocity_rads: velocity,
+                torque_nm: torque,
+                kp,
+                kd,
+            }
+            .to_control_command(),
+            ActuatorType::RobStride04 => RobStride04Command {
+                target_angle_rad: position,
+                target_velocity_rads: velocity,
+                torque_nm: torque,
+                kp,
+                kd,
+            }
+            .to_control_command(),
+            ActuatorType::RobStride06 => RobStride06Command {
+                target_angle_rad: position,
+                target_velocity_rads: velocity,
+                torque_nm: torque,
+                kp,
+                kd,
+            }
+            .to_control_command(),
+        };
+
+        record.state.control_command = cmd;
+        record
+            .actuator
+            .control(record.state.control_command.clone())
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn set_id(&mut self, id: u8, new_id: u8) -> Result<()> {
         let mut actuators = self.actuators.write().await;
         let record = actuators

@@ -2,7 +2,12 @@
 
 import pytest
 
-from actuator import RobstrideActuator, RobstrideActuatorConfig, StubTransportWrapper
+from actuator import (
+    RobstrideActuator,
+    RobstrideActuatorCommand,
+    RobstrideActuatorConfig,
+    StubTransportWrapper,
+)
 
 
 def test_robstride() -> None:
@@ -58,3 +63,24 @@ def test_enable_actuator_requires_dangerous_flag() -> None:
 
     assert supervisor.enable_actuator(1, True) is False
     assert supervisor.disable_actuator(1, False) is False
+
+
+def test_command_actuator_now_requires_motion_gate_and_position() -> None:
+    stub_transport = StubTransportWrapper("stub")
+
+    supervisor = RobstrideActuator(
+        transports=[stub_transport],
+        py_actuators_config=[(1, RobstrideActuatorConfig(6))],
+    )
+
+    cmd = RobstrideActuatorCommand(1)
+    cmd.position = 0.0
+
+    with pytest.raises(ValueError, match="dangerous_motion=True"):
+        supervisor.command_actuator_now(cmd, 10.0, 1.0, False)
+
+    missing_position = RobstrideActuatorCommand(1)
+    with pytest.raises(ValueError, match="cmd.position"):
+        supervisor.command_actuator_now(missing_position, 10.0, 1.0, True)
+
+    assert supervisor.command_actuator_now(cmd, 10.0, 1.0, True) is False
