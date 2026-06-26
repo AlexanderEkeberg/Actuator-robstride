@@ -3,6 +3,7 @@ use eyre::Error;
 use socketcan::async_std::CanSocket;
 #[cfg(target_os = "linux")]
 use socketcan::{EmbeddedFrame, ExtendedId};
+use std::env;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::Mutex as TokioMutex;
@@ -98,6 +99,22 @@ impl CH341Transport {
     }
 }
 
+fn debug_serial_enabled() -> bool {
+    env::var("ROBSTRIDE_DEBUG_SERIAL")
+        .map(|value| {
+            let value = value.to_ascii_lowercase();
+            value == "1" || value == "true" || value == "yes"
+        })
+        .unwrap_or(false)
+}
+
+fn hex_bytes(data: &[u8]) -> String {
+    data.iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 #[cfg(target_os = "linux")]
 impl SocketCanTransport {
     pub async fn new(interface_name: String) -> Result<Self, Error> {
@@ -127,9 +144,19 @@ impl Transport for CH341Transport {
             pkt.extend_from_slice(data);
             pkt.extend_from_slice(b"\r\n");
 
+            if debug_serial_enabled() {
+                eprintln!(
+                    "CH341 TX can_id=0x{id:08x} dlc={} data={} raw={}",
+                    data.len(),
+                    hex_bytes(data),
+                    hex_bytes(&pkt)
+                );
+            }
+
             {
                 let mut writer = writer.lock().await;
                 writer.write_all(&pkt).await?;
+                writer.flush().await?;
             }
             tokio::time::sleep(tokio::time::Duration::from_nanos(20)).await;
             Ok(())
@@ -151,11 +178,23 @@ impl Transport for CH341Transport {
                 if n == 0 {
                     return Err(eyre::eyre!("EOF"));
                 }
+
+                if debug_serial_enabled() {
+                    eprintln!("CH341 RX chunk raw={}", hex_bytes(&buf[pos..pos + n]));
+                }
+
                 pos += n;
 
                 for i in 0..pos.saturating_sub(7) {
                     if buf[i] == b'A' && buf[i + 1] == b'T' {
                         if let Ok((id, data, _msg_len)) = parse_message(&buf[i..pos]) {
+                            if debug_serial_enabled() {
+                                eprintln!(
+                                    "CH341 RX frame can_id=0x{id:08x} dlc={} data={}",
+                                    data.len(),
+                                    hex_bytes(&data)
+                                );
+                            }
                             return Ok((id, data));
                         }
                     }
