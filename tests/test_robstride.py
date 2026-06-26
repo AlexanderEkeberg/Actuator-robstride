@@ -43,3 +43,18 @@ def test_unknown_actuator_type_raises_error() -> None:
             transports=[stub_transport],
             py_actuators_config=[(1, RobstrideActuatorConfig(5))],
         )
+
+
+def test_enable_actuator_requires_dangerous_flag() -> None:
+    stub_transport = StubTransportWrapper("stub")
+
+    supervisor = RobstrideActuator(
+        transports=[stub_transport],
+        py_actuators_config=[(1, RobstrideActuatorConfig(6))],
+    )
+
+    with pytest.raises(ValueError, match="dangerous_enable=True"):
+        supervisor.enable_actuator(1, False)
+
+    assert supervisor.enable_actuator(1, True) is False
+    assert supervisor.disable_actuator(1, False) is False

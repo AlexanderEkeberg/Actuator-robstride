@@ -376,6 +376,42 @@ impl RobstrideActuator {
         })
     }
 
+    fn enable_actuator(&self, actuator_id: u32, dangerous_enable: bool) -> PyResult<bool> {
+        if !dangerous_enable {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "enable_actuator requires dangerous_enable=True",
+            ));
+        }
+
+        if !self.discovered_ids.contains(&actuator_id) {
+            return Ok(false);
+        }
+
+        self.rt.block_on(async {
+            let mut supervisor = self.supervisor.lock().await;
+            supervisor
+                .enable(actuator_id as u8)
+                .await
+                .map_err(ErrReportWrapper)?;
+            Ok(true)
+        })
+    }
+
+    fn disable_actuator(&self, actuator_id: u32, clear_fault: bool) -> PyResult<bool> {
+        if !self.discovered_ids.contains(&actuator_id) {
+            return Ok(false);
+        }
+
+        self.rt.block_on(async {
+            let mut supervisor = self.supervisor.lock().await;
+            supervisor
+                .disable(actuator_id as u8, clear_fault)
+                .await
+                .map_err(ErrReportWrapper)?;
+            Ok(true)
+        })
+    }
+
     fn command_actuators(&self, commands: Vec<RobstrideActuatorCommand>) -> PyResult<Vec<bool>> {
         self.rt.block_on(async {
             let mut results = vec![];
