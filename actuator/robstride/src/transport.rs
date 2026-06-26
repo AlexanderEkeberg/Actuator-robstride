@@ -4,7 +4,7 @@ use socketcan::async_std::CanSocket;
 #[cfg(target_os = "linux")]
 use socketcan::{EmbeddedFrame, ExtendedId};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::Mutex as TokioMutex;
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
 
@@ -71,7 +71,8 @@ pub trait Transport {
 }
 
 pub struct CH341Transport {
-    ser: Arc<TokioMutex<SerialStream>>,
+    reader: Arc<TokioMutex<ReadHalf<SerialStream>>>,
+    writer: Arc<TokioMutex<WriteHalf<SerialStream>>>,
     port_name: String,
 }
 
@@ -88,8 +89,10 @@ pub struct StubTransport {
 impl CH341Transport {
     pub async fn new(port_name: String) -> Result<Self, Error> {
         let ser = tokio_serial::new(&port_name, 921600).open_native_async()?;
+        let (reader, writer) = tokio::io::split(ser);
         Ok(Self {
-            ser: Arc::new(TokioMutex::new(ser)),
+            reader: Arc::new(TokioMutex::new(reader)),
+            writer: Arc::new(TokioMutex::new(writer)),
             port_name,
         })
     }
@@ -114,7 +117,7 @@ impl StubTransport {
 
 impl Transport for CH341Transport {
     fn send<'a>(&'a mut self, id: u32, data: &'a [u8]) -> SendFuture<'a> {
-        let ser = self.ser.clone();
+        let writer = self.writer.clone();
         Box::pin(async move {
             let mut pkt = Vec::new();
             pkt.extend_from_slice(b"AT");
@@ -125,8 +128,8 @@ impl Transport for CH341Transport {
             pkt.extend_from_slice(b"\r\n");
 
             {
-                let mut ser = ser.lock().await;
-                ser.write_all(&pkt).await?;
+                let mut writer = writer.lock().await;
+                writer.write_all(&pkt).await?;
             }
             tokio::time::sleep(tokio::time::Duration::from_nanos(20)).await;
             Ok(())
@@ -134,15 +137,15 @@ impl Transport for CH341Transport {
     }
 
     fn recv(&mut self) -> RecvFuture<'_> {
-        let ser = self.ser.clone();
+        let reader = self.reader.clone();
         Box::pin(async move {
             let mut buf = vec![0; 1024];
             let mut pos = 0;
 
             loop {
                 let n = {
-                    let mut ser = ser.lock().await;
-                    ser.read(&mut buf[pos..]).await?
+                    let mut reader = reader.lock().await;
+                    reader.read(&mut buf[pos..]).await?
                 };
 
                 if n == 0 {
@@ -288,7 +291,8 @@ impl Transport for StubTransport {
 impl Clone for CH341Transport {
     fn clone(&self) -> Self {
         Self {
-            ser: self.ser.clone(),
+            reader: self.reader.clone(),
+            writer: self.writer.clone(),
             port_name: self.port_name.clone(),
         }
     }
