@@ -97,7 +97,19 @@ impl CH341Transport {
             eprintln!("CH341 INIT raw=41542b41540d0a");
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        let mut init_buf = [0u8; 64];
+        match tokio::time::timeout(
+            tokio::time::Duration::from_millis(200),
+            ser.read(&mut init_buf),
+        )
+        .await
+        {
+            Ok(Ok(n)) if n > 0 && debug_serial_enabled() => {
+                eprintln!("CH341 INIT RX raw={}", hex_bytes(&init_buf[..n]));
+            }
+            _ => {}
+        }
+
         let (reader, writer) = tokio::io::split(ser);
         Ok(Self {
             reader: Arc::new(TokioMutex::new(reader)),

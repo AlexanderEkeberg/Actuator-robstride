@@ -186,8 +186,9 @@ impl Supervisor {
         let (tx, mut rx) = mpsc::channel(32);
 
         let state_update_tx = self.state_update_tx.clone();
-        let name_clone = name.clone();
-        let name_for_log = name_clone.clone();
+        let recv_name = name.clone();
+        let send_name = name.clone();
+        let name_for_log = name.clone();
 
         // Create callback for frame processing
         let frame_callback: Arc<dyn Fn(u32, Vec<u8>) + Send + Sync + 'static> =
@@ -221,31 +222,31 @@ impl Supervisor {
         let protocol = Protocol::new(transport.clone(), frame_callback);
         debug!("Created protocol for transport: {}", name);
 
-        // Spawn the transport handling task
-        let mut protocol_clone = protocol.clone();
+        // Spawn independent receive and send tasks. CH341 read can time out or
+        // receive non-CAN adapter status bytes; that must not stop writes.
+        let mut recv_protocol = protocol.clone();
         tokio::spawn(async move {
-            info!("Starting transport handling task for {}", name_clone);
+            info!("Starting transport receive task for {}", recv_name);
             loop {
-                tokio::select! {
-                    // Handle incoming messages
-                    recv_result = protocol_clone.recv() => {
-                        match recv_result {
-                            Ok(_) => trace!("Received message successfully"),
-                            Err(e) => {
-                                error!("Transport receiver error: {}", e);
-                                break;
-                            }
-                        }
+                match recv_protocol.recv().await {
+                    Ok(_) => trace!("Received message successfully"),
+                    Err(e) => {
+                        trace!("Transport receiver error on {}: {}", recv_name, e);
+                        time::sleep(Duration::from_millis(2)).await;
                     }
-                    // Handle outgoing messages
-                    Some(cmd) = rx.recv() => {
-                        trace!("Processing outgoing command: {:?}", cmd);
-                        match cmd {
-                            TxCommand::Send { id, data } => {
-                                if let Err(e) = protocol_clone.send(id, &data).await {
-                                    error!("Transport sender error: {}", e);
-                                }
-                            }
+                }
+            }
+        });
+
+        let mut send_protocol = protocol.clone();
+        tokio::spawn(async move {
+            info!("Starting transport send task for {}", send_name);
+            while let Some(cmd) = rx.recv().await {
+                trace!("Processing outgoing command: {:?}", cmd);
+                match cmd {
+                    TxCommand::Send { id, data } => {
+                        if let Err(e) = send_protocol.send(id, &data).await {
+                            error!("Transport sender error on {}: {}", send_name, e);
                         }
                     }
                 }
