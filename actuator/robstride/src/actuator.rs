@@ -201,12 +201,6 @@ impl CommandData for ObtainIDCommand {
             CommunicationType::ObtainID,
         )
     }
-
-    fn to_can_packet(&self, can_id: u8) -> (u32, Vec<u8>) {
-        let cmd = self.to_command(can_id);
-        let (id, _) = cmd.to_can_packet();
-        (id, vec![0])
-    }
 }
 
 impl CommandData for ControlCommand {

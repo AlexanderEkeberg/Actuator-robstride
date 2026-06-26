@@ -89,7 +89,15 @@ pub struct StubTransport {
 
 impl CH341Transport {
     pub async fn new(port_name: String) -> Result<Self, Error> {
-        let ser = tokio_serial::new(&port_name, 921600).open_native_async()?;
+        let mut ser = tokio_serial::new(&port_name, 921600).open_native_async()?;
+        ser.write_all(b"AT+AT\r\n").await?;
+        ser.flush().await?;
+
+        if debug_serial_enabled() {
+            eprintln!("CH341 INIT raw=41542b41540d0a");
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         let (reader, writer) = tokio::io::split(ser);
         Ok(Self {
             reader: Arc::new(TokioMutex::new(reader)),
@@ -232,18 +240,27 @@ fn parse_message(buf: &[u8]) -> Result<(u32, Vec<u8>, usize), Error> {
     // Get data length
     let data_len = buf[6] as usize;
 
-    // Calculate total message length
-    let total_len = 7 + data_len + 2; // AT + ID + len + data + \r\n
+    // Calculate minimum message length
+    let data_end = 7 + data_len;
+    let min_total_len = data_end + 2; // AT + ID + len + data + \r\n
 
     // Ensure we have enough bytes for the complete packet
-    if buf.len() < total_len {
+    if buf.len() < min_total_len {
         return Err(eyre::eyre!("Incomplete message"));
     }
 
-    // Check \r\n termination
-    if buf[total_len - 2] != b'\r' || buf[total_len - 1] != b'\n' {
+    let terminator_offset = if buf[data_end] == b'\r' && buf[data_end + 1] == b'\n' {
+        data_end
+    } else if let Some(offset) = buf[data_end..]
+        .windows(2)
+        .position(|window| window == b"\r\n")
+    {
+        data_end + offset
+    } else {
         return Err(eyre::eyre!("Invalid message termination"));
-    }
+    };
+
+    let total_len = terminator_offset + 2;
 
     // Extract CAN ID (4 bytes, big endian)
     let mut id_bytes = [0u8; 4];
@@ -254,9 +271,41 @@ fn parse_message(buf: &[u8]) -> Result<(u32, Vec<u8>, usize), Error> {
     let id = (raw_id >> 3) & 0x1FFF_FFFF; // Mask to 29 bits (extended CAN ID)
 
     // Extract data
-    let data = buf[7..7 + data_len].to_vec();
+    let data = buf[7..data_end].to_vec();
 
     Ok((id, data, total_len))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_message;
+
+    #[test]
+    fn parses_ch341_packet_with_exact_declared_data_length() {
+        let raw = [
+            b'A', b'T', 0x00, 0x07, 0xeb, 0xfc, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, b'\r', b'\n',
+        ];
+
+        let (id, data, len) = parse_message(&raw).unwrap();
+
+        assert_eq!(id, 0x0000_fd7f);
+        assert_eq!(data, vec![0; 8]);
+        assert_eq!(len, raw.len());
+    }
+
+    #[test]
+    fn parses_ch341_packet_with_adapter_status_byte_before_terminator() {
+        let raw = [
+            b'A', b'T', 0x00, 0x03, 0xff, 0xf4, 0x08, 0xad, 0x73, 0x30, 0x20, 0x0a, 0x01, 0x33,
+            0x31, 0x20, b'\r', b'\n',
+        ];
+
+        let (id, data, len) = parse_message(&raw).unwrap();
+
+        assert_eq!(id, 0x0000_7ffe);
+        assert_eq!(data, vec![0xad, 0x73, 0x30, 0x20, 0x0a, 0x01, 0x33, 0x31]);
+        assert_eq!(len, raw.len());
+    }
 }
 
 #[cfg(target_os = "linux")]
