@@ -65,17 +65,34 @@ def _unwrap_position(wrapped_position: float, previous_unwrapped: float) -> floa
     return previous_unwrapped + delta
 
 
-def _read_state(supervisor: Any, motor_id: int, settle_seconds: float = 0.015) -> Any | None:
+def _read_state(supervisor: Any, motor_id: int, settle_seconds: float) -> Any | None:
     supervisor.request_feedback(motor_id)
     time.sleep(settle_seconds)
     states = supervisor.get_actuators_state([motor_id])
     return states[0] if states else None
 
 
-def _require_state(supervisor: Any, motor_id: int) -> Any:
-    state = _read_state(supervisor, motor_id)
-    if state is None or state.position is None:
-        raise RuntimeError("missing motor feedback")
+def _require_state(
+    supervisor: Any,
+    motor_id: int,
+    *,
+    timeout_seconds: float,
+    poll_seconds: float,
+) -> Any:
+    deadline = time.monotonic() + timeout_seconds
+    state = None
+    while time.monotonic() < deadline:
+        state = _read_state(supervisor, motor_id, poll_seconds)
+        if state is not None and state.position is not None:
+            return state
+    if state is None:
+        raise RuntimeError(
+            f"missing motor feedback after {timeout_seconds:.3f}s"
+        )
+    if state.position is None:
+        raise RuntimeError(
+            f"missing position feedback after {timeout_seconds:.3f}s"
+        )
     return state
 
 
@@ -147,6 +164,8 @@ def main() -> None:
     parser.add_argument("--max-feedback-torque", type=float, default=25.0)
     parser.add_argument("--max-temperature", type=float, default=70.0)
     parser.add_argument("--max-tracking-error", type=float, default=2.0)
+    parser.add_argument("--feedback-timeout", type=float, default=0.25)
+    parser.add_argument("--feedback-poll", type=float, default=0.03)
     parser.add_argument("--dangerous-enable", action="store_true")
     parser.add_argument("--dangerous-motion", action="store_true")
     parser.add_argument("--confirm", default="")
@@ -187,6 +206,10 @@ def main() -> None:
         raise SystemExit("--rate-hz must be between 10 and 120")
     if args.max_tracking_error <= 0.0 or args.max_tracking_error > 3.0:
         raise SystemExit("--max-tracking-error must be > 0 and <= 3.0 rad")
+    if args.feedback_timeout <= 0.0 or args.feedback_timeout > 1.0:
+        raise SystemExit("--feedback-timeout must be > 0 and <= 1.0")
+    if args.feedback_poll <= 0.0 or args.feedback_poll > args.feedback_timeout:
+        raise SystemExit("--feedback-poll must be > 0 and <= --feedback-timeout")
 
     csv_path = (
         Path(args.csv_file)
@@ -211,7 +234,12 @@ def main() -> None:
     print("Pre-stress feedback:")
     state = None
     for _ in range(5):
-        state = _require_state(supervisor, args.motor_id)
+        state = _require_state(
+            supervisor,
+            args.motor_id,
+            timeout_seconds=args.feedback_timeout,
+            poll_seconds=args.feedback_poll,
+        )
         print(f"  {_format_state(state)}")
         if state.velocity is not None and abs(state.velocity) > args.max_pre_velocity:
             raise SystemExit(
@@ -289,7 +317,12 @@ def main() -> None:
                         args.kd,
                     )
 
-                    state = _require_state(supervisor, args.motor_id)
+                    state = _require_state(
+                        supervisor,
+                        args.motor_id,
+                        timeout_seconds=args.feedback_timeout,
+                        poll_seconds=args.feedback_poll,
+                    )
                     previous_unwrapped = _unwrap_position(state.position, previous_unwrapped)
                     tracking_error = previous_unwrapped - target_position
                     max_abs_error = max(max_abs_error, abs(tracking_error))
