@@ -6,6 +6,7 @@ Sequence:
   3. Small ramp out/back
   4. Sine characterization with CSV logging
   5. Optional extended larger ramp test
+  6. Optional 360 degree spin test
 
 The script does not write parameters, set zero, change ID, or send firmware
 commands. Any stage that enables the motor disables it again in a finally block.
@@ -96,6 +97,19 @@ def _check_state(
             "position moved outside expected window: "
             f"{state.position - start_position:.6f} rad"
         )
+
+
+def _wrap_pi(angle: float) -> float:
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _unwrap_position(wrapped_position: float, previous_unwrapped: float) -> float:
+    delta = wrapped_position - _wrap_pi(previous_unwrapped)
+    if delta > math.pi:
+        delta -= 2.0 * math.pi
+    elif delta < -math.pi:
+        delta += 2.0 * math.pi
+    return previous_unwrapped + delta
 
 
 def _require_state(supervisor: Any, motor_id: int) -> Any:
@@ -315,6 +329,107 @@ def _large_motion_stage(
             _disable(supervisor, motor_id)
 
 
+def _spin_stage(
+    supervisor: Any,
+    motor_id: int,
+    *,
+    start_position: float,
+    revolutions: float,
+    seconds: float,
+    kp: float,
+    kd: float,
+    rate_hz: float,
+    max_velocity: float,
+    max_feedback_torque: float,
+    max_temperature: float,
+    max_tracking_error: float,
+) -> None:
+    print("\n[6/6] 360 degree spin test")
+    enabled = False
+    distance = revolutions * 2.0 * math.pi
+    steps = max(4, int(seconds * rate_hz))
+    sample_dt = 1.0 / rate_hz
+    previous_unwrapped = start_position
+    max_abs_error = 0.0
+    max_abs_velocity = 0.0
+    max_abs_torque = 0.0
+    max_seen_temperature = 0.0
+    next_report = time.monotonic()
+
+    try:
+        _enable(supervisor, motor_id)
+        enabled = True
+        for step in range(steps + 1):
+            loop_start = time.monotonic()
+            u = step / steps
+            smooth = 3.0 * u * u - 2.0 * u * u * u
+            smooth_velocity = (6.0 * u - 6.0 * u * u) / seconds
+            target_position = start_position + distance * smooth
+            target_velocity = distance * smooth_velocity
+
+            _send_position(
+                supervisor,
+                motor_id,
+                target_position,
+                target_velocity,
+                kp,
+                kd,
+            )
+            state = _require_state(supervisor, motor_id)
+            if state.position is None:
+                raise RuntimeError("missing position feedback during spin")
+
+            previous_unwrapped = _unwrap_position(state.position, previous_unwrapped)
+            tracking_error = previous_unwrapped - target_position
+            max_abs_error = max(max_abs_error, abs(tracking_error))
+            if state.velocity is not None:
+                max_abs_velocity = max(max_abs_velocity, abs(state.velocity))
+            if state.torque is not None:
+                max_abs_torque = max(max_abs_torque, abs(state.torque))
+            if state.temperature is not None:
+                max_seen_temperature = max(max_seen_temperature, state.temperature)
+
+            if state.temperature is not None and state.temperature > max_temperature:
+                raise RuntimeError(f"temperature too high: {state.temperature:.6f} C")
+            if state.velocity is not None and abs(state.velocity) > max_velocity:
+                raise RuntimeError(f"velocity too high: {state.velocity:.6f} rad/s")
+            if state.torque is not None and abs(state.torque) > max_feedback_torque:
+                raise RuntimeError(f"feedback torque too high: {state.torque:.6f} Nm")
+            if abs(tracking_error) > max_tracking_error:
+                raise RuntimeError(
+                    f"spin tracking error too high: {tracking_error:.6f} rad"
+                )
+            if abs(previous_unwrapped - start_position) > abs(distance) + 0.50:
+                raise RuntimeError(
+                    "spin moved outside expected window: "
+                    f"{previous_unwrapped - start_position:.6f} rad"
+                )
+
+            now = time.monotonic()
+            if now >= next_report:
+                print(
+                    f"  target={target_position:+.4f} rad "
+                    f"unwrapped={previous_unwrapped:+.4f} rad "
+                    f"err={tracking_error:+.4f} rad | {_format_state(state)}"
+                )
+                next_report = now + 0.35
+
+            sleep_for = sample_dt - (time.monotonic() - loop_start)
+            if sleep_for > 0.0:
+                time.sleep(sleep_for)
+
+        print(
+            "  spin summary: "
+            f"max_error={max_abs_error:.4f} rad "
+            f"max_vel={max_abs_velocity:.4f} rad/s "
+            f"max_torque={max_abs_torque:.4f} Nm "
+            f"max_temp={max_seen_temperature:.1f} C"
+        )
+    finally:
+        if enabled:
+            _disable(supervisor, motor_id)
+
+
 def _characterization_stage(
     supervisor: Any,
     motor_id: int,
@@ -458,9 +573,16 @@ def main() -> None:
     parser.add_argument("--port-name", required=True)
     parser.add_argument("--motor-id", type=int, required=True)
     parser.add_argument("--motor-type", type=int, required=True)
-    parser.add_argument("--profile", choices=["standard", "extended"], default="standard")
+    parser.add_argument(
+        "--profile",
+        choices=["standard", "extended", "spin"],
+        default="standard",
+    )
     parser.add_argument("--motion-step-rad", type=float, default=0.20)
     parser.add_argument("--large-step-rad", type=float, default=1.0)
+    parser.add_argument("--spin-revolutions", type=float, default=1.0)
+    parser.add_argument("--spin-seconds", type=float, default=4.0)
+    parser.add_argument("--max-spin-error", type=float, default=1.25)
     parser.add_argument("--amplitudes", type=_parse_amplitudes, default=[0.10, 0.25, 0.50])
     parser.add_argument("--kp", type=float, default=40.0)
     parser.add_argument("--kd", type=float, default=1.0)
@@ -499,6 +621,14 @@ def main() -> None:
         raise SystemExit("--large-step-rad must be finite and nonzero")
     if abs(args.large_step_rad) > 1.0:
         raise SystemExit("--large-step-rad must be <= 1.0 rad")
+    if not math.isfinite(args.spin_revolutions) or args.spin_revolutions <= 0.0:
+        raise SystemExit("--spin-revolutions must be finite and > 0")
+    if args.spin_revolutions > 1.0:
+        raise SystemExit("--spin-revolutions must be <= 1.0")
+    if args.spin_seconds < 2.5 or args.spin_seconds > 12.0:
+        raise SystemExit("--spin-seconds must be between 2.5 and 12")
+    if args.max_spin_error <= 0.0 or args.max_spin_error > 2.0:
+        raise SystemExit("--max-spin-error must be > 0 and <= 2.0 rad")
     for amplitude in args.amplitudes:
         if not math.isfinite(amplitude) or amplitude <= 0.0:
             raise SystemExit("all amplitudes must be finite and > 0")
@@ -593,7 +723,7 @@ def main() -> None:
         max_feedback_torque=args.max_feedback_torque,
         max_temperature=args.max_temperature,
     )
-    if args.profile == "extended":
+    if args.profile in {"extended", "spin"}:
         _large_motion_stage(
             supervisor,
             args.motor_id,
@@ -606,6 +736,21 @@ def main() -> None:
             max_velocity=args.max_velocity,
             max_feedback_torque=args.max_feedback_torque,
             max_temperature=args.max_temperature,
+        )
+    if args.profile == "spin":
+        _spin_stage(
+            supervisor,
+            args.motor_id,
+            start_position=start_position,
+            revolutions=args.spin_revolutions,
+            seconds=args.spin_seconds,
+            kp=args.kp,
+            kd=args.kd,
+            rate_hz=args.rate_hz,
+            max_velocity=args.max_velocity,
+            max_feedback_torque=args.max_feedback_torque,
+            max_temperature=args.max_temperature,
+            max_tracking_error=args.max_spin_error,
         )
 
     print(f"\nBench sequence complete. CSV log: {csv_path}")
