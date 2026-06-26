@@ -18,6 +18,9 @@ def test_robstride() -> None:
         state = supervisor.get_actuators_state([1])
         assert isinstance(state, list)  # State is empty for now.
 
+    assert supervisor.get_discovered_ids() == []
+    assert supervisor.request_feedback(1) is False
+
 
 def test_robstride06_config_is_accepted() -> None:
     stub_transport = StubTransportWrapper("stub")
@@ -28,6 +31,8 @@ def test_robstride06_config_is_accepted() -> None:
     )
 
     assert supervisor.get_actuators_state([1]) == []
+    assert supervisor.get_discovered_ids() == []
+    assert supervisor.request_feedback(1) is False
 
 
 def test_unknown_actuator_type_raises_error() -> None:

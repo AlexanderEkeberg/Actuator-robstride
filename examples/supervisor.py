@@ -27,9 +27,16 @@ def main() -> None:
         py_actuators_config=[(args.motor_id, RobstrideActuatorConfig(args.motor_type))],
     )
 
+    print(f"Discovered motor IDs: {supervisor.get_discovered_ids()}")
+
     while True:
-        print(f"State (rad, rad/s, Nm): {supervisor.get_actuators_state([args.motor_id])}")
-        time.sleep(1)
+        requested = supervisor.request_feedback(args.motor_id)
+        time.sleep(0.05)
+        print(
+            f"Feedback requested: {requested} | "
+            f"State (rad, rad/s, Nm): {supervisor.get_actuators_state([args.motor_id])}"
+        )
+        time.sleep(0.95)
 
 
 if __name__ == "__main__":

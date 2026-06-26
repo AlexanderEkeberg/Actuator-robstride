@@ -243,6 +243,7 @@ impl StubTransportWrapper {
 struct RobstrideActuator {
     supervisor: Arc<Mutex<Supervisor>>,
     rt: Runtime,
+    discovered_ids: Vec<u32>,
 }
 
 #[gen_stub_pymethods]
@@ -261,9 +262,10 @@ impl RobstrideActuator {
 
         let rt = Runtime::new().map_err(|e| ErrReportWrapper(e.into()))?;
 
-        let supervisor = rt.block_on(async {
+        let (supervisor, discovered_ids) = rt.block_on(async {
             let mut supervisor =
                 Supervisor::new(Duration::from_secs(1)).map_err(ErrReportWrapper)?;
+            let mut all_discovered_ids = Vec::new();
 
             for transport_obj in &transports {
                 let transport_type =
@@ -293,14 +295,43 @@ impl RobstrideActuator {
                         tracing::warn!("Configured motor not found - ID: {}", motor_id);
                     }
                 }
+                for motor_id in discovered_ids {
+                    if !all_discovered_ids.contains(&motor_id) {
+                        all_discovered_ids.push(motor_id);
+                    }
+                }
             }
 
-            Ok::<Supervisor, ErrReportWrapper>(supervisor)
+            let all_discovered_ids = all_discovered_ids
+                .into_iter()
+                .map(|motor_id| motor_id as u32)
+                .collect();
+            Ok::<(Supervisor, Vec<u32>), ErrReportWrapper>((supervisor, all_discovered_ids))
         })?;
 
         Ok(RobstrideActuator {
             supervisor: Arc::new(Mutex::new(supervisor)),
             rt,
+            discovered_ids,
+        })
+    }
+
+    fn get_discovered_ids(&self) -> Vec<u32> {
+        self.discovered_ids.clone()
+    }
+
+    fn request_feedback(&self, actuator_id: u32) -> PyResult<bool> {
+        if !self.discovered_ids.contains(&actuator_id) {
+            return Ok(false);
+        }
+
+        self.rt.block_on(async {
+            let supervisor = self.supervisor.lock().await;
+            supervisor
+                .request_feedback(actuator_id as u8)
+                .await
+                .map_err(ErrReportWrapper)?;
+            Ok(true)
         })
     }
 
