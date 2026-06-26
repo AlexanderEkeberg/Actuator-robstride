@@ -2,8 +2,25 @@
 
 import argparse
 import time
+from typing import Any
 
 from actuator import CH341TransportWrapper, RobstrideActuator, RobstrideActuatorConfig
+
+
+def _format_value(value: float | None, unit: str) -> str:
+    if value is None:
+        return "None"
+    return f"{value:.6f} {unit}"
+
+
+def _format_state(state: Any) -> str:
+    return (
+        f"id={state.actuator_id} online={state.online} "
+        f"pos={_format_value(state.position, 'rad')} "
+        f"vel={_format_value(state.velocity, 'rad/s')} "
+        f"torque={_format_value(state.torque, 'Nm')} "
+        f"temp={_format_value(state.temperature, 'C')}"
+    )
 
 
 def main() -> None:
@@ -32,9 +49,11 @@ def main() -> None:
     while True:
         requested = supervisor.request_feedback(args.motor_id)
         time.sleep(0.05)
+        states = supervisor.get_actuators_state([args.motor_id])
+        state_text = ", ".join(_format_state(state) for state in states) if states else "[]"
         print(
             f"Feedback requested: {requested} | "
-            f"State (rad, rad/s, Nm): {supervisor.get_actuators_state([args.motor_id])}"
+            f"State: {state_text}"
         )
         time.sleep(0.95)
 

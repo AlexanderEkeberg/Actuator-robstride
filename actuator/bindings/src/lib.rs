@@ -116,6 +116,29 @@ struct RobstrideActuatorState {
     temperature: Option<f64>,
 }
 
+fn format_optional_state_value(value: Option<f64>, unit: &str) -> String {
+    match value {
+        Some(value) => format!("{value:.6} {unit}"),
+        None => "None".to_string(),
+    }
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl RobstrideActuatorState {
+    fn __repr__(&self) -> String {
+        format!(
+            "RobstrideActuatorState(actuator_id={}, online={}, position={}, velocity={}, torque={}, temperature={})",
+            self.actuator_id,
+            self.online,
+            format_optional_state_value(self.position, "rad"),
+            format_optional_state_value(self.velocity, "rad/s"),
+            format_optional_state_value(self.torque, "Nm"),
+            format_optional_state_value(self.temperature, "C"),
+        )
+    }
+}
+
 fn command_values_rad_native(cmd: &RobstrideActuatorCommand) -> (f32, f32, f32) {
     (
         cmd.position.map(|p| p as f32).unwrap_or(0.0),
