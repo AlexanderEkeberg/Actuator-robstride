@@ -5,6 +5,7 @@ Sequence:
   2. Enable-only hold
   3. Small ramp out/back
   4. Sine characterization with CSV logging
+  5. Optional extended larger ramp test
 
 The script does not write parameters, set zero, change ID, or send firmware
 commands. Any stage that enables the motor disables it again in a finally block.
@@ -264,6 +265,56 @@ def _motion_stage(
             _disable(supervisor, motor_id)
 
 
+def _large_motion_stage(
+    supervisor: Any,
+    motor_id: int,
+    *,
+    start_position: float,
+    step_rad: float,
+    kp: float,
+    kd: float,
+    ramp_seconds: float,
+    rate_hz: float,
+    max_velocity: float,
+    max_feedback_torque: float,
+    max_temperature: float,
+) -> None:
+    print("\n[5/5] Extended larger ramp motion")
+    enabled = False
+    try:
+        _enable(supervisor, motor_id)
+        enabled = True
+        max_delta_from_start = abs(step_rad) + 0.15
+        waypoints = [
+            start_position + step_rad,
+            start_position,
+            start_position - step_rad,
+            start_position,
+        ]
+        current = start_position
+        for waypoint in waypoints:
+            print(f"  ramp {current:+.6f} rad -> {waypoint:+.6f} rad")
+            _ramp(
+                supervisor,
+                motor_id,
+                start_position=start_position,
+                from_position=current,
+                to_position=waypoint,
+                kp=kp,
+                kd=kd,
+                duration=ramp_seconds,
+                rate_hz=rate_hz,
+                max_delta_from_start=max_delta_from_start,
+                max_velocity=max_velocity,
+                max_feedback_torque=max_feedback_torque,
+                max_temperature=max_temperature,
+            )
+            current = waypoint
+    finally:
+        if enabled:
+            _disable(supervisor, motor_id)
+
+
 def _characterization_stage(
     supervisor: Any,
     motor_id: int,
@@ -407,13 +458,16 @@ def main() -> None:
     parser.add_argument("--port-name", required=True)
     parser.add_argument("--motor-id", type=int, required=True)
     parser.add_argument("--motor-type", type=int, required=True)
+    parser.add_argument("--profile", choices=["standard", "extended"], default="standard")
     parser.add_argument("--motion-step-rad", type=float, default=0.20)
+    parser.add_argument("--large-step-rad", type=float, default=1.0)
     parser.add_argument("--amplitudes", type=_parse_amplitudes, default=[0.10, 0.25, 0.50])
     parser.add_argument("--kp", type=float, default=40.0)
     parser.add_argument("--kd", type=float, default=1.0)
     parser.add_argument("--read-seconds", type=float, default=3.0)
     parser.add_argument("--enable-seconds", type=float, default=2.0)
     parser.add_argument("--ramp-seconds", type=float, default=1.0)
+    parser.add_argument("--large-ramp-seconds", type=float, default=2.0)
     parser.add_argument("--frequency-hz", type=float, default=0.25)
     parser.add_argument("--cycles", type=float, default=1.0)
     parser.add_argument("--rate-hz", type=float, default=25.0)
@@ -441,6 +495,10 @@ def main() -> None:
         raise SystemExit("--motion-step-rad must be finite and nonzero")
     if abs(args.motion_step_rad) > 0.50:
         raise SystemExit("--motion-step-rad must be <= 0.50 rad")
+    if not math.isfinite(args.large_step_rad) or abs(args.large_step_rad) <= 0.0:
+        raise SystemExit("--large-step-rad must be finite and nonzero")
+    if abs(args.large_step_rad) > 1.0:
+        raise SystemExit("--large-step-rad must be <= 1.0 rad")
     for amplitude in args.amplitudes:
         if not math.isfinite(amplitude) or amplitude <= 0.0:
             raise SystemExit("all amplitudes must be finite and > 0")
@@ -454,6 +512,8 @@ def main() -> None:
         raise SystemExit("--frequency-hz must be > 0.05 and <= 1.0")
     if args.cycles <= 0.0 or args.cycles > 5.0:
         raise SystemExit("--cycles must be > 0 and <= 5")
+    if args.large_ramp_seconds <= 0.5 or args.large_ramp_seconds > 8.0:
+        raise SystemExit("--large-ramp-seconds must be > 0.5 and <= 8")
     if args.rate_hz < 5.0 or args.rate_hz > 80.0:
         raise SystemExit("--rate-hz must be between 5 and 80")
 
@@ -479,7 +539,7 @@ def main() -> None:
 
     print(
         "Bench sequence: "
-        f"type={args.motor_type} id={args.motor_id} "
+        f"profile={args.profile} type={args.motor_type} id={args.motor_id} "
         f"step={args.motion_step_rad} rad amplitudes={args.amplitudes} "
         f"kp={args.kp} kd={args.kd}"
     )
@@ -533,6 +593,20 @@ def main() -> None:
         max_feedback_torque=args.max_feedback_torque,
         max_temperature=args.max_temperature,
     )
+    if args.profile == "extended":
+        _large_motion_stage(
+            supervisor,
+            args.motor_id,
+            start_position=start_position,
+            step_rad=args.large_step_rad,
+            kp=args.kp,
+            kd=args.kd,
+            ramp_seconds=args.large_ramp_seconds,
+            rate_hz=args.rate_hz,
+            max_velocity=args.max_velocity,
+            max_feedback_torque=args.max_feedback_torque,
+            max_temperature=args.max_temperature,
+        )
 
     print(f"\nBench sequence complete. CSV log: {csv_path}")
 
